@@ -41,6 +41,8 @@ After `industrial-properties-migration.sql`, run `industrial-distribution-operat
 
 After `property-ownership-migration.sql`, run `property-owner-share-scope-migration.sql`. It allows an owner relationship to store both a percentage share and an apartment/use scope, without deleting relationship data.
 
+After those ownership migrations, run `property-unit-ownership-migration.sql` to add the multi-unit construction flag and per-unit ownership map. It preserves existing data and backfills ownership already linked to units, plus sole-owner mappings for all planned units. Do not rerun `property-rebuild.sql` just to add these fields.
+
 ## Optional automation webhooks
 
 These are only needed for their corresponding automation features:

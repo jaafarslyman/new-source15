@@ -1,85 +1,42 @@
-import React, { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Building2, ChevronRight, FileText, MapPin, MessageSquare, Pencil, ShieldAlert, Trash2,
-  UserRound, Users, X, Zap,
+  Building2, MapPin, Pencil, Trash2, UserRound, Users, X, Zap,
 } from 'lucide-react';
 import {
-  HOSPITALITY_SPACE_TYPES, MIXED_USE_COMPONENTS, mixedUseOwnershipScopeLabel, propertyAddress, propertyCategoryLabel, propertyStatusLabel, propertyTypeLabel, RETAIL_CENTER_TYPES, type Property,
+  APARTMENT_BUILDING_FACILITIES,
+  COMMERCIAL_FACILITIES,
+  DISTRIBUTION_CENTER_FACILITIES,
+  HOSPITALITY_FACILITIES,
+  HOSPITALITY_SPACE_TYPES,
+  HOME_FACILITIES,
+  INDUSTRIAL_SHARED_FACILITIES,
+  MANUFACTURING_PLANT_FACILITIES,
+  MIXED_USE_COMPONENTS,
+  mixedUseOwnershipScopeLabel,
   mixedUseFloorPlanSummary,
+  OFFICE_FACILITIES,
+  propertyAddress,
+  propertyCategoryLabel,
+  propertyTypeLabel,
+  RESEARCH_FACILITY_FACILITIES,
+  RETAIL_CENTER_FACILITIES,
+  RETAIL_CENTER_TYPES,
+  RETAIL_UNIT_FACILITIES,
+  supportsPropertyRental,
+  type Property,
+  WAREHOUSE_FACILITIES,
 } from '@/lib/propertiesTypes';
 import type { Contact, ContactPropertyRelationship } from '@/lib/contactsTypes';
 import type { Unit } from '@/lib/unitsTypes';
-import { supabase } from '@/lib/supabase';
-import { ageLabel, requestPriorityLabel, requestStatusLabel, type RequestRecord } from '@/lib/requestsTypes';
-import { useLocation } from 'wouter';
-
-export interface PropertyStaffLink {
-  id: string | number;
-  staff_id: number | string;
-  property_id: string;
-  notes: string | null;
-  staff?: { id: number | string; name: string; role: string | null; department: string | null; status: string | null } | null;
-}
-
-export interface PropertyServiceLink {
-  id: string | number;
-  service_id: string;
-  property_id: string;
-  service?: { id: string; name: string; category: string; status: string } | null;
-}
-
-export interface PropertyUnitServiceLink {
-  id: string | number;
-  service_id: string;
-  unit_id: string;
-  unit?: { id: string; unit_number: string; property_id: string } | null;
-  service?: { id: string; name: string; category: string; status: string } | null;
-}
-
-function StatusPill({ status }: { status: string | null }) {
-  const tone = status === 'active'
-    ? 'bg-[#edf7ef] text-[#327443] border-[#d6ecd9]'
-    : status === 'inactive'
-      ? 'bg-[#fff7e6] text-[#a36810] border-[#f1dfb8]'
-      : 'bg-[#f1f0ee] text-[#77736d] border-[#e1dfda]';
-  return <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${tone}`}>{propertyStatusLabel(status)}</span>;
-}
 
 function InfoRow({ label, value }: { label: string; value: string | number | null | undefined }) {
+  if (value === null || value === undefined || value === '') return null;
   return (
     <div className="border-b border-[#f0eeeb] py-3 last:border-0">
       <p className="text-[10px] font-semibold uppercase tracking-[.08em] text-[#9b968d]">{label}</p>
-      <p className="mt-1 whitespace-pre-wrap text-[13px] leading-[1.5] text-[#37342f]">
-        {value === null || value === undefined || value === '' ? <span className="italic text-[#b1aca4]">Unavailable</span> : value}
-      </p>
+      <p className="mt-1 whitespace-pre-wrap text-[13px] leading-[1.5] text-[#37342f]">{value}</p>
     </div>
   );
-}
-
-function FutureSection({ icon: Icon, title, description }: { icon: React.ElementType; title: string; description: string }) {
-  return (
-    <div className="flex items-start gap-3 rounded-[12px] border border-dashed border-[#dedad3] bg-[#faf9f7] p-4">
-      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[9px] bg-[#efede8] text-[#858078]"><Icon size={15} strokeWidth={1.7} /></div>
-      <div><p className="text-[12px] font-semibold text-[#4b4741]">{title}</p><p className="mt-1 text-[11px] leading-[1.5] text-[#9b968d]">{description}</p><span className="mt-2 inline-flex rounded-full border border-[#e3dfd9] bg-white px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[.06em] text-[#aaa59d]">Not connected</span></div>
-    </div>
-  );
-}
-
-function PropertyIssues({ propertyId }: { propertyId: string }) {
-  const [issues, setIssues] = useState<RequestRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    let active = true;
-    supabase.from('requests').select('*').eq('property_id', propertyId).order('updated_at', { ascending: false }).then(({ data }) => {
-      if (active) { setIssues((data as RequestRecord[]) ?? []); setLoading(false); }
-    });
-    return () => { active = false; };
-  }, [propertyId]);
-  return <section className="mt-4 rounded-[14px] border border-[#e9e6e1] bg-white p-5">
-    <div className="mb-3 flex items-center justify-between"><div><h3 className="text-[13px] font-semibold text-[#302d28]">Requests / Issues</h3><p className="mt-1 text-[11px] text-[#9a958d]">Operational work connected to this property.</p></div><ShieldAlert size={16} className="text-[#aaa59d]" /></div>
-    {loading ? <p className="text-[11px] text-[#9b968d]">Loading requests…</p> : issues.length === 0 ? <p className="rounded-[10px] border border-dashed border-[#d9d5ce] px-4 py-6 text-center text-[11px] text-[#97928a]">No requests linked to this property.</p> : <div className="space-y-2">{issues.map((issue) => <div key={issue.id} className="rounded-[10px] border border-[#f0eeeb] p-3"><div className="flex items-start justify-between gap-3"><p className="truncate text-[12px] font-semibold text-[#35322e]">{issue.title}</p><div className="flex gap-1.5"><span className="rounded-full border border-[#e3dfd9] bg-[#f5f3f0] px-2 py-0.5 text-[10px] font-semibold text-[#77736d]">{requestStatusLabel(issue.status)}</span><span className="rounded-full border border-[#e3dfd9] bg-[#f5f3f0] px-2 py-0.5 text-[10px] font-semibold text-[#77736d]">{requestPriorityLabel(issue.priority)}</span></div></div><p className="mt-1 text-[10px] text-[#9b968d]">{ageLabel(issue.created_at, issue.closed_at)}</p></div>)}</div>}
-  </section>;
 }
 
 function PropertyOwners({ property, contacts, ownerships }: { property: Property; contacts: Contact[]; ownerships: ContactPropertyRelationship[] }) {
@@ -106,40 +63,54 @@ interface PropertyProfileModalProps {
   contacts: Contact[];
   ownerships: ContactPropertyRelationship[];
   units: Unit[];
-  staffAssignments: PropertyStaffLink[];
-  propertyServices: PropertyServiceLink[];
-  unitServices: PropertyUnitServiceLink[];
-  connectionLoadError: string | null;
   onClose: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-export default function PropertyProfileModal({ property, contacts, ownerships, units, staffAssignments, propertyServices, unitServices, connectionLoadError, onClose, onEdit, onDelete }: PropertyProfileModalProps) {
-  const [, navigate] = useLocation();
+export default function PropertyProfileModal({ property, contacts, ownerships, units, onClose, onEdit, onDelete }: PropertyProfileModalProps) {
   const propertyUnits = units.filter((unit) => unit.property_id === property.id);
-  const linkedStaff = staffAssignments.filter((item) => item.property_id === property.id);
-  const linkedPropertyServices = propertyServices.filter((item) => item.property_id === property.id);
-  const propertyUnitIds = new Set(propertyUnits.map((item) => item.id));
-  const linkedUnitServices = unitServices.filter((item) => propertyUnitIds.has(item.unit_id));
-  const serviceMap = new Map<string, { service?: PropertyServiceLink['service']; units: string[]; propertyWide: boolean }>();
-  linkedPropertyServices.forEach((item) => serviceMap.set(item.service_id, { service: item.service, units: [], propertyWide: true }));
-  linkedUnitServices.forEach((item) => {
-    const row = serviceMap.get(item.service_id) ?? { service: item.service, units: [], propertyWide: false };
-    row.units.push(item.unit?.unit_number ?? 'Unit');
-    serviceMap.set(item.service_id, row);
-  });
-  const linkedServices = [...serviceMap.entries()];
   const isSingleHome = property.property_type === 'single_family_home';
   const isMixedUse = property.property_type === 'mixed_use_development';
+  const hasUnitRecords = property.property_type === 'multifamily_units'
+    || property.property_type === 'apartment_building'
+    || isMixedUse;
   const propertyLevelRental = isSingleHome || ['office_building', 'retail_center', 'restaurant_hospitality'].includes(property.property_type ?? '');
-  const totalUnits = propertyLevelRental ? 1 : isMixedUse ? propertyUnits.length : property.units_count;
+  const totalUnits = isMixedUse
+    ? (property.mixed_use_floor_plan ?? []).reduce((total, floor) => total + Object.values(floor).reduce((sum, value) => sum + Number(value || 0), 0), 0)
+    : property.units_count;
   const occupiedUnits = propertyLevelRental ? Number(Boolean(property.is_rented)) : propertyUnits.filter((unit) => unit.status === 'occupied').length;
   const vacantUnits = propertyLevelRental ? Number(!property.is_rented) : propertyUnits.filter((unit) => unit.status === 'vacant').length;
   const propertyRenter = ownerships.find((relationship) => relationship.property_id === property.id && !relationship.unit_id && relationship.relationship_type === 'tenant');
   const renterName = contacts.find((contact) => String(contact.id) === String(propertyRenter?.contact_id))?.name;
   const commercialSpaceType = [...RETAIL_CENTER_TYPES, ...HOSPITALITY_SPACE_TYPES].find((item) => item.value === property.commercial_space_type)?.label;
   const mixedUseSummary = property.mixed_use_components?.map((value) => MIXED_USE_COMPONENTS.find((item) => item.value === value)?.label ?? value).join(', ');
+  const facilityOptions = [
+    ...HOME_FACILITIES,
+    ...APARTMENT_BUILDING_FACILITIES,
+    ...COMMERCIAL_FACILITIES,
+    ...OFFICE_FACILITIES,
+    ...RETAIL_CENTER_FACILITIES,
+    ...RETAIL_UNIT_FACILITIES,
+    ...HOSPITALITY_FACILITIES,
+    ...WAREHOUSE_FACILITIES,
+    ...DISTRIBUTION_CENTER_FACILITIES,
+    ...MANUFACTURING_PLANT_FACILITIES,
+    ...RESEARCH_FACILITY_FACILITIES,
+    ...INDUSTRIAL_SHARED_FACILITIES,
+  ];
+  const facilityLabel = (value: string) => facilityOptions.find((option) => option.value === value)?.label
+    ?? value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const selectedFacilities = [...new Set([...(property.facilities ?? []), ...(property.custom_facilities ?? [])])];
+  const operationalDetails = [
+    { label: 'Goods stored', value: property.warehouse_goods?.join(', ') },
+    { label: 'Goods handled', value: property.distribution_goods?.join(', ') },
+    { label: 'Distribution operations', value: property.distribution_services?.join(', ') },
+    { label: 'Products manufactured', value: property.manufactured_products?.join(', ') },
+    { label: 'Production inputs', value: property.production_inputs?.join(', ') },
+    { label: 'Research focus', value: property.research_focus?.join(', ') },
+    { label: 'Research inputs', value: property.research_inputs?.join(', ') },
+  ].filter((item) => Boolean(item.value));
   return (
     <AnimatePresence>
       <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
@@ -157,7 +128,7 @@ export default function PropertyProfileModal({ property, contacts, ownerships, u
             <div className="flex min-w-0 items-center gap-3">
               <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[11px] bg-[#eeebe5] text-[#706b62]"><Building2 size={19} strokeWidth={1.6} /></div>
               <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2"><h2 id="property-profile-title" className="truncate text-[17px] font-semibold tracking-[-.02em] text-[#151412]">{property.name}</h2><StatusPill status={property.status} /></div>
+                <h2 id="property-profile-title" className="truncate text-[17px] font-semibold tracking-[-.02em] text-[#151412]">{property.name}</h2>
                 <p className="mt-1 flex items-center gap-1.5 truncate text-[11px] text-[#858078]"><MapPin size={11} />{propertyAddress(property) || 'Address unavailable'}</p>
               </div>
             </div>
@@ -171,40 +142,75 @@ export default function PropertyProfileModal({ property, contacts, ownerships, u
             <div className="grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
               <section className="rounded-[14px] border border-[#e9e6e1] bg-white p-5">
                 <div className="mb-3 flex items-center justify-between"><div><h3 className="text-[13px] font-semibold text-[#302d28]">Overview</h3><p className="mt-1 text-[11px] text-[#9a958d]">The essentials your team needs at a glance.</p></div><Building2 size={16} className="text-[#aaa59d]" /></div>
-                 <div className="grid gap-x-7 sm:grid-cols-2"><InfoRow label="Category" value={propertyCategoryLabel(property.property_category)} /><InfoRow label="Property type" value={propertyTypeLabel(property.property_type)} />{property.property_type === 'office_building' && <><InfoRow label="Inside a building" value={property.office_in_building === null ? null : property.office_in_building ? 'Yes' : 'No'} /><InfoRow label="Office floor" value={property.office_in_building ? property.office_floor === 0 ? 'Ground floor' : property.office_floor : null} /></>}{(property.property_type === 'retail_center' || property.property_type === 'restaurant_hospitality') && <InfoRow label={property.property_type === 'retail_center' ? 'Retail center type' : 'Hospitality space type'} value={commercialSpaceType} />}{isMixedUse && <><InfoRow label="Included uses" value={mixedUseSummary} /><InfoRow label="Mixed-use floor plan" value={mixedUseFloorPlanSummary(property.mixed_use_floor_plan, property.mixed_use_components)} /></>}<InfoRow label={isMixedUse ? 'Spaces' : 'Units'} value={totalUnits} /><InfoRow label="Building floors" value={property.floor_count} /><InfoRow label="Rooms" value={property.room_count} /><InfoRow label="Address line 1" value={property.address_line1} /><InfoRow label="Address line 2" value={property.address_line2} /><InfoRow label="City" value={property.city} /><InfoRow label="State / region" value={property.state} /><InfoRow label="Postal code" value={property.postal_code} /><InfoRow label="Country" value={property.country} /></div>
-                <div className="mt-3 border-t border-[#f0eeeb] pt-1"><InfoRow label="Description" value={property.description} /></div>
+                <div className="grid gap-x-7 sm:grid-cols-2">
+                  <InfoRow label="Category" value={propertyCategoryLabel(property.property_category)} />
+                  <InfoRow label="Property type" value={propertyTypeLabel(property.property_type)} />
+                  {property.property_type === 'office_building' && <>
+                    <InfoRow label="Inside a building" value={property.office_in_building === null ? null : property.office_in_building ? 'Yes' : 'No'} />
+                    <InfoRow label="Office floor" value={property.office_in_building ? property.office_floor === 0 ? 'Ground floor' : property.office_floor : null} />
+                  </>}
+                  {property.property_type === 'warehouse' || property.property_type === 'distribution_center' || property.property_type === 'research_development_facility' ? <>
+                    <InfoRow label="Inside a building" value={property.industrial_in_building === null ? null : property.industrial_in_building ? 'Yes' : 'No'} />
+                    <InfoRow label="Industrial floor" value={property.industrial_in_building ? property.industrial_floor === 0 ? 'Ground floor' : property.industrial_floor : null} />
+                  </> : null}
+                  {(property.property_type === 'retail_center' || property.property_type === 'restaurant_hospitality') && <InfoRow label={property.property_type === 'retail_center' ? 'Retail center type' : 'Hospitality space type'} value={commercialSpaceType} />}
+                  {isMixedUse && <>
+                    <InfoRow label="Included uses" value={mixedUseSummary} />
+                    <InfoRow label="Mixed-use floor plan" value={mixedUseFloorPlanSummary(property.mixed_use_floor_plan, property.mixed_use_components)} />
+                  </>}
+                  {hasUnitRecords && <InfoRow label={isMixedUse ? 'Planned spaces' : 'Planned units'} value={totalUnits} />}
+                  {property.units_under_construction && <InfoRow label="Construction status" value="Other units are still under construction" />}
+                  <InfoRow label="Building floors" value={property.floor_count} />
+                  <InfoRow label="Per-floor unit capacity" value={property.floor_unit_counts?.map((count, index) => `${index === 0 ? 'Ground floor' : `Floor ${index}`}: ${count}`).join(' · ')} />
+                  <InfoRow label="Rooms" value={property.room_count} />
+                  <InfoRow label="Address line 1" value={property.address_line1} />
+                  <InfoRow label="Address line 2" value={property.address_line2} />
+                  <InfoRow label="City" value={property.city} />
+                  <InfoRow label="State / region" value={property.state} />
+                  <InfoRow label="Postal code" value={property.postal_code} />
+                  <InfoRow label="Country" value={property.country} />
+                </div>
               </section>
-              <section className="rounded-[14px] border border-[#e9e6e1] bg-white p-5">
+              {hasUnitRecords && <section className="rounded-[14px] border border-[#e9e6e1] bg-white p-5">
                  <div className="mb-3 flex items-center justify-between"><div><h3 className="text-[13px] font-semibold text-[#302d28]">Units</h3><p className="mt-1 text-[11px] text-[#9a958d]">Manage units from the property card.</p></div><Zap size={16} className="text-[#aaa59d]" /></div>
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-                  <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">Total units</span><span className="text-[11px] font-medium text-[#37342f]">{totalUnits ?? <span className="italic text-[#aaa59d]">Unavailable</span>}</span></div>
+                  <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">{isMixedUse ? 'Planned spaces' : 'Total units'}</span><span className="text-[11px] font-medium text-[#37342f]">{totalUnits ?? '—'}</span></div>
                   <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">Rented</span><span className="text-[11px] font-medium text-[#37342f]">{occupiedUnits}</span></div>
                   <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">Not rented</span><span className="text-[11px] font-medium text-[#37342f]">{vacantUnits}</span></div>
-                  {!isSingleHome && <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">Units recorded</span><span className="text-[11px] font-medium text-[#37342f]">{propertyUnits.length}</span></div>}
+                  <div className="flex items-center justify-between rounded-[9px] bg-[#faf9f7] px-3 py-2.5"><span className="text-[11px] text-[#77736d]">Units recorded</span><span className="text-[11px] font-medium text-[#37342f]">{propertyUnits.length}</span></div>
                 </div>
-              </section>
+              </section>}
             </div>
             <section className="mt-4 rounded-[14px] border border-[#e9e6e1] bg-white p-5">
-              <div className="mb-4"><h3 className="text-[13px] font-semibold text-[#302d28]">Notes</h3><p className="mt-1 text-[11px] text-[#9a958d]">Practical information for the people working this property.</p></div>
-              <div className="grid gap-x-7 sm:grid-cols-2"><InfoRow label="Facilities" value={[...(property.facilities ?? []), ...(property.custom_facilities ?? [])].join(', ')} /><InfoRow label="Per-floor unit capacity" value={property.floor_unit_counts?.map((count, index) => `${index === 0 ? 'Ground floor' : `Floor ${index}`}: ${count}`).join(' · ')} /><InfoRow label="Monthly rent (USD)" value={property.is_rented ? property.monthly_rent : null} /><InfoRow label="Lease duration" value={property.is_rented ? property.lease_term_type === 'until_termination' ? 'Until termination' : property.lease_term_type === 'fixed' ? 'Fixed term' : null : null} /><InfoRow label="Renter" value={property.is_rented ? renterName ?? (propertyRenter ? 'Contact unavailable' : 'Renter not linked') : null} /><InfoRow label="Amenities" value={property.amenities} /><InfoRow label="Property rules" value={property.property_rules} /><InfoRow label="Parking information" value={property.parking_information} /><InfoRow label="Access information" value={property.access_information} /><InfoRow label="Utilities information" value={property.utilities_information} /><InfoRow label="Emergency information" value={property.emergency_information} /><div className="sm:col-span-2"><InfoRow label="Internal notes" value={property.notes} /></div></div>
-            </section>
-             <PropertyOwners property={property} contacts={contacts} ownerships={ownerships} />
-            <PropertyIssues propertyId={property.id} />
-              <section className="mt-4">
-                <div className="mb-3"><h3 className="text-[13px] font-semibold text-[#302d28]">Team and services</h3><p className="mt-1 text-[11px] text-[#9a958d]">Assignments shared with the Staff and Services pages.</p></div>
-                {connectionLoadError && <p className="mb-3 rounded-[9px] border border-[#f1dfb8] bg-[#fffaf0] px-3 py-2 text-[11px] text-[#8d671b]">Some assignments could not be loaded: {connectionLoadError}</p>}
-                <div className="grid gap-3 lg:grid-cols-2">
-                  <div className="rounded-[12px] border border-[#e9e6e1] bg-white p-4">
-                    <div className="mb-3 flex items-center justify-between"><h4 className="text-[12px] font-semibold text-[#35322e]">Assigned staff</h4><button type="button" onClick={() => navigate('/team')} className="flex items-center gap-1 text-[10px] font-semibold text-[#77736d] hover:text-[#151412]">Staff page<ChevronRight size={12} /></button></div>
-                    {linkedStaff.length ? <div className="space-y-2">{linkedStaff.map((item) => <div key={String(item.id)} className="rounded-[9px] bg-[#faf9f7] px-3 py-2"><p className="text-[11px] font-semibold text-[#35322e]">{item.staff?.name ?? 'Staff unavailable'}</p><p className="mt-0.5 text-[10px] text-[#8e8981]">{[item.staff?.role, item.staff?.department, item.notes].filter(Boolean).join(' · ') || 'No assignment notes'}</p></div>)}</div> : <p className="rounded-[9px] border border-dashed border-[#d9d5ce] px-3 py-4 text-center text-[10px] text-[#97928a]">No staff assigned to this property.</p>}
-                  </div>
-                  <div className="rounded-[12px] border border-[#e9e6e1] bg-white p-4">
-                    <div className="mb-3 flex items-center justify-between"><h4 className="text-[12px] font-semibold text-[#35322e]">Available services</h4><button type="button" onClick={() => navigate('/services')} className="flex items-center gap-1 text-[10px] font-semibold text-[#77736d] hover:text-[#151412]">Services page<ChevronRight size={12} /></button></div>
-                    {linkedServices.length ? <div className="space-y-2">{linkedServices.map(([serviceId, row]) => <div key={serviceId} className="rounded-[9px] bg-[#faf9f7] px-3 py-2"><div className="flex items-center justify-between gap-2"><p className="text-[11px] font-semibold text-[#35322e]">{row.service?.name ?? 'Service unavailable'}</p><span className="text-[9px] text-[#8e8981]">{row.service?.status ?? 'Status unavailable'}</span></div><p className="mt-0.5 text-[10px] text-[#8e8981]">{[row.service?.category, row.propertyWide ? 'Property-wide' : '', row.units.length ? `Units ${row.units.join(', ')}` : ''].filter(Boolean).join(' · ')}</p></div>)}</div> : <p className="rounded-[9px] border border-dashed border-[#d9d5ce] px-3 py-4 text-center text-[10px] text-[#97928a]">No services linked to this property or its units.</p>}
-                  </div>
+              <div className="mb-4"><h3 className="text-[13px] font-semibold text-[#302d28]">Facilities & features</h3><p className="mt-1 text-[11px] text-[#9a958d]">Selected for this property.</p></div>
+              {selectedFacilities.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {selectedFacilities.map((facility) => {
+                    const custom = (property.custom_facilities ?? []).includes(facility);
+                    return <span key={facility} data-testid={`property-facility-${facility}`} className="inline-flex items-center gap-2 rounded-full border border-[#dce6dc] bg-[#f3f7f1] py-1.5 pl-2 pr-3 text-[10px] font-medium text-[#4d6a59]">
+                      <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-[.06em] text-[#7e8b7c]">{custom ? 'Custom' : 'Facility'}</span>
+                      {facilityLabel(facility)}
+                    </span>;
+                  })}
                 </div>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2"><FutureSection icon={FileText} title="Documents" description="Leases, inspections, and property files." /><FutureSection icon={MessageSquare} title="Communication" description="Property-related communication history." /></div>
-              </section>
+              ) : <p className="rounded-[10px] border border-dashed border-[#dedad3] bg-[#faf9f7] px-3.5 py-3 text-[10px] text-[#969188]">No facilities selected.</p>}
+            </section>
+            {supportsPropertyRental(property.property_type) && <section className="mt-4 rounded-[14px] border border-[#e9e6e1] bg-white p-5">
+              <div className="mb-3"><h3 className="text-[13px] font-semibold text-[#302d28]">Occupancy & lease</h3><p className="mt-1 text-[11px] text-[#9a958d]">Rental information entered for this property.</p></div>
+              <div className="grid gap-x-7 sm:grid-cols-2">
+                <InfoRow label="Rental status" value={property.is_rented ? 'Rented' : 'Not rented'} />
+                <InfoRow label="Renter" value={property.is_rented ? renterName : null} />
+                <InfoRow label="Monthly rent" value={property.is_rented ? property.monthly_rent : null} />
+                <InfoRow label="Lease duration" value={property.is_rented ? property.lease_term_type === 'until_termination' ? 'Until termination' : property.lease_term_type === 'fixed' ? 'Fixed term' : null : null} />
+                <InfoRow label="Lease start" value={property.is_rented ? property.lease_start_date : null} />
+                <InfoRow label="Lease end" value={property.is_rented ? property.lease_end_date : null} />
+              </div>
+            </section>}
+            {operationalDetails.length > 0 && <section className="mt-4 rounded-[14px] border border-[#e9e6e1] bg-white p-5">
+              <div className="mb-3"><h3 className="text-[13px] font-semibold text-[#302d28]">Operational details</h3><p className="mt-1 text-[11px] text-[#9a958d]">Details entered for this property type.</p></div>
+              <div className="grid gap-x-7 sm:grid-cols-2">{operationalDetails.map((item) => <InfoRow key={item.label} label={item.label} value={item.value} />)}</div>
+            </section>}
+            <PropertyOwners property={property} contacts={contacts} ownerships={ownerships} />
           </div>
         </motion.div>
       </div>

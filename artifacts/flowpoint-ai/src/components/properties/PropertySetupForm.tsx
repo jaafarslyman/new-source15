@@ -86,6 +86,41 @@ let nextSyntheticContactId = -1;
 type FacilityOption = { value: string; label: string; group?: string };
 type FacilityGroup = { label: string; options: readonly FacilityOption[] };
 type MixedUseFloorDraft = Record<string, string>;
+type UnitOwnerAssignmentDraft = {
+  unit_number: string;
+  owner_key: string;
+  ownership_percentage: string;
+};
+
+function ownerAssignmentKey(owner: OwnerDraft, index: number) {
+  return owner.id !== undefined
+    ? `relationship:${String(owner.id)}`
+    : `draft:${String(owner.temp_contact_id ?? index)}`;
+}
+
+function ownerContactReference(owner: OwnerDraft, index: number) {
+  return owner.source === 'existing' && owner.contact_id
+    ? String(owner.contact_id)
+    : String(owner.temp_contact_id ?? -(index + 1));
+}
+
+function unitNumbersFromScope(scope: string, unitCount: number) {
+  const numbers = new Set<string>();
+  scope.split(',').forEach((part) => {
+    const token = part.trim();
+    const range = token.match(/^(\d+)\s*(?:-|–|—|to)\s*(\d+)$/i);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      for (let number = Math.min(start, end); number <= Math.max(start, end) && number <= unitCount; number += 1) {
+        if (number > 0) numbers.add(String(number));
+      }
+    } else if (/^\d+$/.test(token) && Number(token) > 0 && Number(token) <= unitCount) {
+      numbers.add(String(Number(token)));
+    }
+  });
+  return [...numbers];
+}
 
 function groupedFacilityOptions(...groups: FacilityGroup[]) {
   const options = new Map<string, FacilityOption>();
@@ -260,6 +295,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
   const [customFacilities, setCustomFacilities] = useState<string[]>([]);
   const [customFacility, setCustomFacility] = useState('');
   const [owners, setOwners] = useState<OwnerDraft[]>([blankOwner()]);
+  const [unitOwnerAssignments, setUnitOwnerAssignments] = useState<UnitOwnerAssignmentDraft[]>([]);
   const [rented, setRented] = useState<boolean | null>(null);
   const [renter, setRenter] = useState<PropertyRenterDraft>(blankRenter());
   const [pendingUnits, setPendingUnits] = useState<UnitSavePayload[]>([]);
@@ -322,7 +358,29 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
     setFacilities(property?.facilities ?? []);
     setCustomFacilities(property?.custom_facilities ?? []);
     setCustomFacility('');
-    setOwners(initialOwners.length ? initialOwners.map((owner) => ({ ...owner, entity_type: owner.entity_type ?? 'individual' })) : [blankOwner()]);
+    const ownerRows = initialOwners.length
+      ? initialOwners.map((owner) => ({ ...owner, entity_type: owner.entity_type ?? 'individual' }))
+      : [blankOwner()];
+    setOwners(ownerRows);
+    const savedUnitMap = (property?.unit_ownership_map ?? []).flatMap((allocation) => {
+      const ownerIndex = ownerRows.findIndex((owner) =>
+        owner.source === 'existing' && String(owner.contact_id) === String(allocation.contact_id),
+      );
+      if (ownerIndex < 0) return [];
+      return [{
+        unit_number: String(allocation.unit_number),
+        owner_key: ownerAssignmentKey(ownerRows[ownerIndex], ownerIndex),
+        ownership_percentage: allocation.ownership_percentage == null ? '' : String(allocation.ownership_percentage),
+      }];
+    });
+    const legacyScopeMap = savedUnitMap.length || !property
+      ? []
+      : ownerRows.flatMap((owner, index) => unitNumbersFromScope(owner.ownership_scope, Number(property.units_count) || 0).map((unitNumber) => ({
+        unit_number: unitNumber,
+        owner_key: ownerAssignmentKey(owner, index),
+        ownership_percentage: '',
+      })));
+    setUnitOwnerAssignments(savedUnitMap.length ? savedUnitMap : legacyScopeMap);
     setRented(property?.is_rented ?? null);
     setRenter({
       ...blankRenter(),
@@ -338,6 +396,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
       lease_end_date: property?.lease_end_date ?? initialRenter?.lease_end_date ?? '',
     });
     setPendingUnits([]);
+    if (!property) setUnitOwnerAssignments([]);
     setUnitEditorOpen(false);
     setSaveError('');
   }, [property, ownersSignature, initialRenter]);
@@ -347,6 +406,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
   const singleFamily = subtype === 'single_family_home';
   const multifamily = subtype === 'multifamily_units';
   const apartment = subtype === 'apartment_building';
+  const unitMappedProperty = multifamily || apartment;
   const commercial = category === 'commercial';
   const industrial = category === 'industrial';
   const officeBuilding = subtype === 'office_building';
@@ -371,6 +431,44 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
   const hasUnenteredOwnerShare = owners.some((owner) => !owner.ownership_percentage.trim());
   const ownerShareTotal = owners.reduce((total, owner) => total + (isValidOwnershipShare(owner.ownership_percentage) ? Number(owner.ownership_percentage) : 0), 0);
   const formatOwnershipShare = (share: number) => Number(share.toFixed(2)).toString();
+  const unitOwnershipMap = useMemo(() => {
+    if (!unitMappedProperty) return [];
+    const unitCount = Number(form.units_count);
+    if (!Number.isInteger(unitCount) || unitCount < 1) return [];
+    return Array.from({ length: unitCount }, (_, index) => String(index + 1)).flatMap((unitNumber) => {
+      if (owners.length === 1) {
+        return [{
+          unit_number: unitNumber,
+          contact_id: ownerContactReference(owners[0], 0),
+          ownership_percentage: null,
+        }];
+      }
+      const assignments = unitOwnerAssignments.filter((assignment) =>
+        assignment.unit_number === unitNumber
+        && owners.some((owner, ownerIndex) => ownerAssignmentKey(owner, ownerIndex) === assignment.owner_key),
+      );
+      return assignments.map((assignment) => {
+        const ownerIndex = owners.findIndex((owner, index) => ownerAssignmentKey(owner, index) === assignment.owner_key);
+        return {
+          unit_number: unitNumber,
+          contact_id: ownerIndex >= 0 ? ownerContactReference(owners[ownerIndex], ownerIndex) : '',
+          ownership_percentage: assignments.length > 1 && assignment.ownership_percentage.trim()
+            ? Number(assignment.ownership_percentage)
+            : null,
+        };
+      }).filter((allocation) => allocation.contact_id);
+    });
+  }, [unitMappedProperty, form.units_count, owners, unitOwnerAssignments]);
+  const summarizeOwnerUnits = (ownerKey: string) => unitOwnerAssignments
+    .filter((assignment) => assignment.owner_key === ownerKey)
+    .sort((a, b) => Number(a.unit_number) - Number(b.unit_number))
+    .map((assignment) => {
+      const allocations = unitOwnerAssignments.filter((item) => item.unit_number === assignment.unit_number);
+      return allocations.length > 1 && assignment.ownership_percentage.trim()
+        ? `Unit ${assignment.unit_number} (${assignment.ownership_percentage}%)`
+        : `Unit ${assignment.unit_number}`;
+    })
+    .join(', ');
   const sharedFacilityOptions = useMemo(() => {
     if (mixedUse) {
       const groups: FacilityGroup[] = [];
@@ -443,6 +541,8 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
     property_category: category || 'residential',
     property_type: subtype,
     units_count: multifamily || apartment ? form.units_count : null,
+    units_under_construction: Boolean(form.units_under_construction),
+    unit_ownership_map: unitOwnershipMap,
     floor_count: singleFamily || apartment || mixedUse ? (floorCount ? Number(floorCount) : null) : null,
     floor_unit_counts: apartment ? floorCapacities.map((capacity) => Number(capacity) || 0) : [],
     room_count: singleFamily ? (roomCount ? Number(roomCount) : null) : null,
@@ -458,11 +558,11 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
     lease_term_type: propertyCanRent && rented ? renter.lease_term_type : null,
     lease_start_date: propertyCanRent && rented ? renter.lease_start_date || null : null,
     lease_end_date: propertyCanRent && rented && renter.lease_term_type === 'fixed' ? renter.lease_end_date || null : null,
-  }), [property, form, category, subtype, multifamily, apartment, singleFamily, officeBuilding, officeInBuilding, officeFloor, retailCenter, hospitalitySpace, commercialSpaceType, mixedUse, mixedUseComponents, mixedUseFloorPlan, propertyCanRent, floorCount, floorCapacities, roomCount, propertyFacilities, customFacilities, rented, renter]);
+  }), [property, form, category, subtype, multifamily, apartment, singleFamily, officeBuilding, officeInBuilding, officeFloor, retailCenter, hospitalitySpace, commercialSpaceType, mixedUse, mixedUseComponents, mixedUseFloorPlan, propertyCanRent, floorCount, floorCapacities, roomCount, propertyFacilities, customFacilities, rented, renter, unitOwnershipMap]);
   const inlineOwnerData = useMemo(() => {
     const syntheticContacts: Contact[] = [];
     const relations: ContactPropertyRelationship[] = [];
-    if (apartment || mixedUse) owners.forEach((owner, index) => {
+    if (unitMappedProperty || mixedUse) owners.forEach((owner, index) => {
       const selectedContact = contacts.find((contact) => String(contact.id) === owner.contact_id);
       const contactId = owner.source === 'existing' && owner.contact_id ? owner.contact_id : owner.temp_contact_id ?? -(index + 1);
       if (owner.source === 'new') syntheticContacts.push({
@@ -500,12 +600,16 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
         start_date: null,
         end_date: null,
         notes: null,
-        ownership_percentage: Number(owner.ownership_percentage) || null,
-        ownership_scope: (apartment || mixedUse) && owners.length > 1 ? owner.ownership_scope || null : null,
+        ownership_percentage: unitMappedProperty
+          ? owners.length === 1 ? 100 : null
+          : Number(owner.ownership_percentage) || null,
+        ownership_scope: unitMappedProperty
+          ? owners.length === 1 ? 'Entire property' : summarizeOwnerUnits(ownerAssignmentKey(owner, index)) || null
+          : mixedUse && owners.length > 1 ? owner.ownership_scope || null : null,
       });
     });
     return { contacts: [...contacts, ...syntheticContacts], relationships: relations };
-  }, [apartment, mixedUse, owners, contacts, previewProperty.id]);
+  }, [unitMappedProperty, mixedUse, owners, contacts, previewProperty.id, summarizeOwnerUnits]);
   const inlineUnitRecords = useMemo<Unit[]>(() => pendingUnits.map((item, index) => ({
     ...item.draft,
     id: `pending-unit-${index}`,
@@ -520,9 +624,25 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
   const inlineUnitLimitReached = mixedUse
     ? mixedUsePlanReady && inlineUnitRecords.length >= mixedUsePlannedSpaces
     : configuredUnits > 0 && inlineUnitRecords.length >= configuredUnits;
+  const unitOwnerMappingReady = !unitMappedProperty || (
+    owners.length > 0
+    && owners.every((owner) => owner.source === 'existing'
+      ? Boolean(owner.contact_id)
+      : Boolean(owner.name.trim() && (owner.email.trim() || owner.phone.trim())))
+    && (owners.length === 1 || Array.from({ length: configuredUnits }, (_, index) => String(index + 1)).every((unitNumber) => {
+      const allocations = unitOwnerAssignments.filter((assignment) =>
+        assignment.unit_number === unitNumber
+        && owners.some((owner, index) => ownerAssignmentKey(owner, index) === assignment.owner_key),
+      );
+      return allocations.length > 0 && (allocations.length === 1
+        || (allocations.every((allocation) => isValidOwnershipShare(allocation.ownership_percentage))
+          && Math.abs(allocations.reduce((sum, allocation) => sum + Number(allocation.ownership_percentage), 0) - 100) < 0.001));
+    }))
+  );
   const inlineLayoutReady = mixedUse
     ? mixedUsePlanReady
     : configuredUnits > 0 && Number.isInteger(configuredUnits)
+    && unitOwnerMappingReady
     && (!apartment || (
       Number(floorCount) > 0
       && floorCapacities.length === Number(floorCount)
@@ -537,6 +657,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
     setField('property_category', nextCategory);
     setField('property_type', '');
     setField('units_count', null);
+    setUnitOwnerAssignments([]);
     setFloorCount('');
     setFloorCapacities([]);
     setPendingUnits([]);
@@ -621,8 +742,38 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
       if (!floorCount.trim() || !Number.isInteger(Number(floorCount)) || Number(floorCount) <= 0) next.floor_count = 'Enter a whole-number floor count greater than 0.';
     }
     if (multifamily && (!form.units_count || !Number.isInteger(Number(form.units_count)) || Number(form.units_count) <= 0)) next.units_count = 'Enter a whole-number unit count greater than 0.';
-    if ((multifamily || apartment) && Number.isInteger(Number(form.units_count)) && Number(form.units_count) > 0 && pendingUnits.length > Number(form.units_count)) {
-      next.inline_units = `The property is configured for ${form.units_count} units, but ${pendingUnits.length} have been added.`;
+    if (unitMappedProperty && Number.isInteger(Number(form.units_count)) && Number(form.units_count) > 0) {
+      const recordedUnits = property
+        ? existingUnits.filter((unit) => unit.property_id === property.id).length
+        : pendingUnits.length;
+      if (recordedUnits > Number(form.units_count)) {
+        next.inline_units = `The property is configured for ${form.units_count} units, but ${recordedUnits} have already been added.`;
+      } else if (recordedUnits < Number(form.units_count) && !form.units_under_construction) {
+        next.inline_units = `Add all ${form.units_count} units, or select “Other units are still under construction” to save with units missing.`;
+      }
+    }
+    if (unitMappedProperty && owners.length > 1 && Number.isInteger(Number(form.units_count)) && Number(form.units_count) > 0) {
+      const ownerKeys = owners.map((owner, index) => ownerAssignmentKey(owner, index));
+      for (let number = 1; number <= Number(form.units_count); number += 1) {
+        const assignments = unitOwnerAssignments.filter((assignment) =>
+          assignment.unit_number === String(number) && ownerKeys.includes(assignment.owner_key),
+        );
+        if (!assignments.length) {
+          next.unit_ownership_map = `Assign an owner to every unit. Unit ${number} has no owner yet.`;
+          break;
+        }
+        if (assignments.length > 1) {
+          if (assignments.some((assignment) => !isValidOwnershipShare(assignment.ownership_percentage))) {
+            next.unit_ownership_map = `Enter a valid ownership share for each owner of unit ${number}.`;
+            break;
+          }
+          const total = assignments.reduce((sum, assignment) => sum + Number(assignment.ownership_percentage), 0);
+          if (Math.abs(total - 100) > 0.001) {
+            next.unit_ownership_map = `Ownership shares for unit ${number} must total 100% (currently ${Number(total.toFixed(2))}%).`;
+            break;
+          }
+        }
+      }
     }
     if (apartment) {
       if (!floorCount.trim() || !Number.isInteger(Number(floorCount)) || Number(floorCount) <= 0) next.floor_count = 'Enter a whole-number floor count greater than 0.';
@@ -729,24 +880,25 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
         if (invalidOwnerAssignment) next.inline_units = 'A mapped space has no current owner or its owner does not own that use. Remove and re-add the space after updating owner assignments.';
       }
     }
-    if ((singleFamily || apartment || commercial || industrial) && owners.length === 0) next.owners = 'Add at least one owner.';
-    if (singleFamily || apartment || commercial || industrial) {
+    const ownershipEnabled = singleFamily || unitMappedProperty || commercial || industrial || mixedUse;
+    if (ownershipEnabled && owners.length === 0) next.owners = 'Add at least one owner.';
+    if (ownershipEnabled) {
       owners.forEach((owner, index) => {
         if (owner.source === 'existing' && !owner.contact_id) next[`owner_${index}`] = 'Select an existing contact.';
         if (owner.source === 'new' && !owner.name.trim()) next[`owner_${index}`] = 'Owner name is required.';
         if (owner.source === 'new' && !owner.email.trim() && !owner.phone.trim()) next[`owner_${index}`] = 'Add an email or phone number.';
         if (owner.source === 'new' && owner.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner.email.trim())) next[`owner_${index}`] = 'Enter a valid email address.';
-        if (!isValidOwnershipShare(owner.ownership_percentage)) {
+        if (!unitMappedProperty && !isValidOwnershipShare(owner.ownership_percentage)) {
           next[`owner_share_${index}`] = 'Enter a share greater than 0 and no more than 100, with up to 2 decimal places.';
         }
-        if (apartment && owners.length > 1 && !/^\d+(?:\s*[-–—]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–—]\s*\d+)?)*$/.test(owner.ownership_scope.trim())) {
+        if (apartment && owners.length > 1 && !unitMappedProperty && !/^\d+(?:\s*[-–—]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–—]\s*\d+)?)*$/.test(owner.ownership_scope.trim())) {
           next[`owner_scope_${index}`] = 'List the units or ranges this owner holds (for example, 1–4, 8).';
         }
         if (mixedUse && owners.length > 1 && !mixedUseOwnershipScopeValues(owner.ownership_scope).some((value) => mixedUseComponents.includes(value))) {
           next[`owner_scope_${index}`] = 'Choose at least one included use this owner owns.';
         }
       });
-      if (ownerSharesAreValid) {
+      if (!unitMappedProperty && ownerSharesAreValid) {
         const sum = Number(ownerShareTotal.toFixed(2));
         if (Math.abs(sum - 100) > 0.001) next.owner_total = `Ownership percentages must total 100% (currently ${sum}%).`;
       }
@@ -770,7 +922,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
       }
     }
     return next;
-  }, [form, subtype, singleFamily, multifamily, apartment, commercial, industrial, officeBuilding, officeInBuilding, officeFloor, retailCenter, hospitalitySpace, commercialSpaceType, mixedUse, mixedUseComponents, mixedUseFloorPlan, property, existingUnits, propertyCanRent, roomCount, floorCount, floorCapacities, owners, rented, renter, pendingUnits, industrialBuildingSubtype, warehouse, distributionCenter, manufacturingPlant, researchFacility, propertyFacilities, customFacilities]);
+  }, [form, subtype, singleFamily, multifamily, apartment, unitMappedProperty, commercial, industrial, officeBuilding, officeInBuilding, officeFloor, retailCenter, hospitalitySpace, commercialSpaceType, mixedUse, mixedUseComponents, mixedUseFloorPlan, property, existingUnits, propertyCanRent, roomCount, floorCount, floorCapacities, owners, unitOwnerAssignments, rented, renter, pendingUnits, industrialBuildingSubtype, warehouse, distributionCenter, manufacturingPlant, researchFacility, propertyFacilities, customFacilities]);
 
   const canSave = Object.keys(validation).length === 0 && !saving;
   const save = async () => {
@@ -788,6 +940,10 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
       postal_code: form.postal_code?.trim() || null,
       country: form.country?.trim() || null,
       units_count: multifamily || apartment ? Number(form.units_count) : null,
+      units_under_construction: unitMappedProperty
+        && Boolean(form.units_under_construction)
+        && (property ? existingUnits.filter((unit) => unit.property_id === property.id).length : pendingUnits.length) < Number(form.units_count),
+      unit_ownership_map: unitOwnershipMap,
       property_category: category,
       facilities: propertyFacilities,
       custom_facilities: customFacilities,
@@ -814,13 +970,17 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
       lease_start_date: propertyCanRent && rented ? renter.lease_start_date : null,
       lease_end_date: propertyCanRent && rented && renter.lease_term_type === 'fixed' ? renter.lease_end_date : null,
     } as PropertyDraft;
-    const ownerRows = singleFamily || apartment || commercial || industrial ? owners.map((owner) => ({
+    const ownerRows = singleFamily || unitMappedProperty || commercial || industrial || mixedUse ? owners.map((owner, index) => ({
       ...owner,
       name: owner.name.trim(),
       email: owner.email.trim(),
       phone: owner.phone.trim(),
-      ownership_percentage: owner.ownership_percentage.trim(),
-      ownership_scope: mixedUse && owners.length > 1
+      ownership_percentage: unitMappedProperty
+        ? owners.length === 1 ? '100' : ''
+        : owner.ownership_percentage.trim(),
+      ownership_scope: unitMappedProperty
+        ? owners.length === 1 ? 'Entire property' : summarizeOwnerUnits(ownerAssignmentKey(owner, index))
+        : mixedUse && owners.length > 1
         ? mixedUseOwnershipScopeValues(owner.ownership_scope).filter((value) => mixedUseComponents.includes(value)).join(',')
         : apartment && owners.length > 1 ? owner.ownership_scope.trim() : '',
     })) : [];
@@ -895,7 +1055,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                         {singleFamily && <><Field label="Rooms" required><input data-testid="input-property-room-count" className={inputClass} type="number" min="1" step="1" value={roomCount} onChange={(event) => setRoomCount(event.target.value)} placeholder="e.g. 5" /></Field><Field label="Floors" required><input data-testid="input-property-floor-count" className={inputClass} type="number" min="1" step="1" value={floorCount} onChange={(event) => { const value = event.target.value; setFloorCount(value); setFloorCapacities(Array.from({ length: Math.min(Number(value) || 0, 100) }, (_, index) => floorCapacities[index] ?? '')); }} placeholder="e.g. 2" /></Field></>}
                         {apartment && <><Field label="Floors" required><input data-testid="input-property-floor-count" className={inputClass} type="number" min="1" step="1" value={floorCount} onChange={(event) => { const value = event.target.value; setFloorCount(value); setFloorCapacities(Array.from({ length: Math.min(Number(value) || 0, 100) }, (_, index) => floorCapacities[index] ?? '')); }} placeholder="e.g. 4" /></Field><Field label="Total units" required><input data-testid="input-property-unit-count" className={inputClass} type="number" min="1" step="1" value={form.units_count ?? ''} onChange={(event) => setField('units_count', event.target.value ? Number(event.target.value) : null)} placeholder="e.g. 24" /><FormError message={validation.units_count} testId="error-property-unit-count" /></Field></>}
-                        {multifamily && <div className="sm:col-span-2"><Field label="Number of units" required><input data-testid="input-property-unit-count" className={inputClass} type="number" min="1" step="1" value={form.units_count ?? ''} onChange={(event) => setField('units_count', event.target.value ? Number(event.target.value) : null)} placeholder="e.g. 8" /></Field><FormError message={validation.units_count} testId="error-property-unit-count" /><p className="mt-1.5 text-[10px] text-[#969188]">You can add units now or later from the property card.</p></div>}
+                        {multifamily && <div className="sm:col-span-2"><Field label="Number of units" required><input data-testid="input-property-unit-count" className={inputClass} type="number" min="1" step="1" value={form.units_count ?? ''} onChange={(event) => setField('units_count', event.target.value ? Number(event.target.value) : null)} placeholder="e.g. 8" /></Field><FormError message={validation.units_count} testId="error-property-unit-count" /><p className="mt-1.5 text-[10px] text-[#969188]">Add each planned unit now, or mark the remaining units as under construction below.</p></div>}
                       </div>
                       {singleFamily && <div className="mt-1 grid grid-cols-1 gap-3 sm:grid-cols-2"><FormError message={validation.room_count} testId="error-property-room-count" /><FormError message={validation.floor_count} testId="error-property-floor-count" /></div>}
                       {apartment && <>
@@ -905,6 +1065,16 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
                           <FormError message={validation.floor_count || validation.floor_capacities} testId="error-property-floor-capacities" />
                         </div>
                       </>}
+                      {unitMappedProperty && <label className="mt-4 flex cursor-pointer items-start gap-2.5 rounded-[10px] border border-[#e5e2dc] bg-white px-3.5 py-3">
+                        <input
+                          data-testid="checkbox-units-under-construction"
+                          type="checkbox"
+                          checked={Boolean(form.units_under_construction)}
+                          onChange={(event) => setField('units_under_construction', event.target.checked)}
+                          className="mt-0.5 h-4 w-4 accent-[#55776b]"
+                        />
+                        <span><span className="block text-[11px] font-semibold text-[#45443d]">Other units are still under construction</span><span className="mt-1 block text-[10px] leading-4 text-[#8e8981]">Select this only when some of the configured units cannot be added yet. You can complete them later.</span></span>
+                      </label>}
                     </section>}
 
                     {commercial && <section className="mb-7" data-testid="section-commercial-details">
@@ -985,7 +1155,7 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
                     </section>}
 
                     {industrial && <section className="mb-7" data-testid="section-industrial-details">
-                      <SectionHeading index="01" eyebrow="Industrial details" title="Configure this operation" description="Capture the building location, materials, products, or research focus for this industrial property." />
+                      <SectionHeading index="01" eyebrow="Property mapping" title="Map this industrial property" description="Capture whether this space is standalone or located inside another building." />
                       {industrialBuildingSubtype && <div className="space-y-3">
                         <Field label="Is this property inside a building?" required>
                           <div className="grid grid-cols-2 gap-2" role="group" aria-label="Industrial building location">
@@ -998,48 +1168,98 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
                           <FormError message={validation.industrial_floor} testId="error-industrial-floor" />
                         </Field>}
                       </div>}
-                      {warehouse && <div className="mt-4">
-                        <Field label="Goods stored" required hint="Choose suggestions or enter other inventory types">
-                          <TagListInput id="input-warehouse-goods" value={form.warehouse_goods ?? []} onChange={(value) => updateIndustrialTags('warehouse_goods', value)} placeholder="Add a type of stored goods" suggestions={WAREHOUSE_GOODS} />
-                        </Field>
-                        <FormError message={validation.warehouse_goods} testId="error-warehouse-goods" />
-                      </div>}
-                      {distributionCenter && <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                        <div>
-                          <Field label="Goods handled" required hint="Select the goods types moving through this center">
-                            <TagListInput id="input-distribution-goods" value={form.distribution_goods ?? []} onChange={(value) => updateIndustrialTags('distribution_goods', value)} placeholder="Add a goods type" suggestions={DISTRIBUTION_GOODS} />
-                          </Field>
-                          <FormError message={validation.distribution_goods} testId="error-distribution-goods" />
-                        </div>
-                        <div>
-                          <Field label="Distribution operations" hint="Optional: select the services performed here">
-                            <TagListInput id="input-distribution-services" value={form.distribution_services ?? []} onChange={(value) => updateIndustrialTags('distribution_services', value)} placeholder="Add an operation" suggestions={DISTRIBUTION_SERVICES} />
-                          </Field>
-                        </div>
-                      </div>}
-                      {manufacturingPlant && <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                        <div>
-                          <Field label="Products manufactured" required hint="List the products or product families">
-                            <TagListInput id="input-manufactured-products" value={form.manufactured_products ?? []} onChange={(value) => updateIndustrialTags('manufactured_products', value)} placeholder="Add a manufactured product" suggestions={MANUFACTURED_PRODUCT_SUGGESTIONS} />
-                          </Field>
-                          <FormError message={validation.manufactured_products} testId="error-manufactured-products" />
-                        </div>
-                        <Field label="Production inputs" hint="Optional raw materials, components, or process inputs">
-                          <TagListInput id="input-production-inputs" value={form.production_inputs ?? []} onChange={(value) => updateIndustrialTags('production_inputs', value)} placeholder="Add a production input" suggestions={PRODUCTION_INPUT_SUGGESTIONS} />
-                        </Field>
-                      </div>}
-                      {researchFacility && <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                        <div>
-                          <Field label="Research focus" required hint="List the research disciplines or activities">
-                            <TagListInput id="input-research-focus" value={form.research_focus ?? []} onChange={(value) => updateIndustrialTags('research_focus', value)} placeholder="Add a research focus" suggestions={RESEARCH_FOCUS_SUGGESTIONS} />
-                          </Field>
-                          <FormError message={validation.research_focus} testId="error-research-focus" />
-                        </div>
-                        <Field label="Research inputs" hint="Optional samples, materials, or specialized inputs">
-                          <TagListInput id="input-research-inputs" value={form.research_inputs ?? []} onChange={(value) => updateIndustrialTags('research_inputs', value)} placeholder="Add a research input" suggestions={RESEARCH_INPUT_SUGGESTIONS} />
-                        </Field>
-                      </div>}
                     </section>}
+
+                    {(singleFamily || unitMappedProperty || commercial || industrial || mixedUse) && (
+                      <section className="mb-7" data-testid="section-property-owners">
+                        <SectionHeading
+                          index="02"
+                          eyebrow="Ownership"
+                          title="Who owns this property?"
+                          description={unitMappedProperty
+                            ? owners.length === 1
+                              ? 'The sole owner will be assigned to every unit. Add more owners to map different units or shared ownership.'
+                              : 'Assign each unit to its owner or owners. Percentages are only needed when a unit is shared.'
+                            : mixedUse
+                              ? 'Ownership shares must total 100%. For multiple owners, also assign the uses each owner owns.'
+                              : 'Add one or more owners. Ownership shares must total 100%.'}
+                        />
+                        <div className="space-y-3">
+                          {owners.map((owner, index) => {
+                            const selectedContact = contacts.find((contact) => String(contact.id) === owner.contact_id);
+                            const ownerName = owner.source === 'new' ? owner.name : selectedContact?.name ?? owner.name;
+                            const ownerKey = ownerAssignmentKey(owner, index);
+                            return (
+                              <article key={owner.id ?? `owner-${index}`} data-testid={`card-property-owner-${index}`} className="rounded-[12px] border border-[#e7e4de] bg-white p-3.5 sm:p-4">
+                                <div className="mb-3 flex items-center justify-between gap-3">
+                                  <div className="flex items-center gap-2">
+                                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f0f2ec] text-[#7e8a77]"><UserRound size={13} /></span>
+                                    <div><p className="text-[12px] font-semibold text-[#37362f]">{owners.length > 1 ? `Owner ${index + 1}` : 'Property owner'}</p><p className="mt-0.5 text-[10px] text-[#969188]">Select a contact or add one</p></div>
+                                  </div>
+                                  {owners.length > 1 && <button type="button" data-testid={`button-remove-owner-${index}`} onClick={() => {
+                                    setOwners((current) => current.filter((_, ownerIndex) => ownerIndex !== index));
+                                    setUnitOwnerAssignments((current) => current.filter((assignment) => assignment.owner_key !== ownerKey));
+                                  }} aria-label={`Remove owner ${index + 1}`} className="flex h-7 w-7 items-center justify-center rounded-full text-[#938e85] hover:bg-[#fbefed] hover:text-[#a33e34]"><Trash2 size={13} /></button>}
+                                </div>
+                                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                  <Field label="Entity type" required><FlowPointSelect testId={`select-owner-${index}-entity-type`} value={owner.entity_type} onChange={(value) => setOwner(index, { entity_type: value as OwnerDraft['entity_type'], contact_id: '', source: 'existing' })} placeholder="Choose entity type" options={[{ value: 'individual', label: 'Individual' }, { value: 'company', label: 'Company' }]} /></Field>
+                                  {!unitMappedProperty && <Field label="Ownership share" required><div className="relative"><input data-testid={`input-owner-${index}-percentage`} className={`${inputClass} pr-8`} type="number" min="0.01" max="100" step="0.01" value={owner.ownership_percentage} onChange={(event) => setOwner(index, { ownership_percentage: event.target.value })} placeholder="e.g. 100" /><span className="pointer-events-none absolute right-3 top-[11px] text-[11px] text-[#929087]">%</span></div></Field>}
+                                  {mixedUse && owners.length > 1 && <div className="sm:col-span-2"><Field label="Uses this owner owns" required hint="Select every included use they own"><div className="grid grid-cols-1 gap-1.5 rounded-[9px] border border-[#e4e2de] bg-white p-2 sm:grid-cols-2">{MIXED_USE_COMPONENTS.filter((component) => mixedUseComponents.includes(component.value)).map((component) => {
+                                    const checked = mixedUseOwnershipScopeValues(owner.ownership_scope).includes(component.value);
+                                    return <button key={component.value} type="button" data-testid={`button-owner-${index}-scope-${component.value}`} aria-pressed={checked} onClick={() => toggleOwnerMixedUseScope(index, component.value)} className={`flex min-h-8 items-center gap-2 rounded-[7px] px-2 text-left text-[10px] ${checked ? 'bg-[#edf4ee] text-[#4d6a59]' : 'text-[#69665f] hover:bg-[#f7f6f2]'}`}><span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[4px] border ${checked ? 'border-[#63816e] bg-[#63816e] text-white' : 'border-[#d5d2ca] bg-white'}`}>{checked && <Check size={10} />}</span>{component.label}</button>;
+                                  })}</div></Field></div>}
+                                </div>
+                                <div className="mt-3"><ContactFields row={owner} index={index} kind="owner" contacts={contacts} entityType={owner.entity_type} onChange={(patch) => setOwner(index, patch as Partial<OwnerDraft>)} /></div>
+                                <FormError message={validation[`owner_${index}`] || validation[`owner_share_${index}`] || validation[`owner_scope_${index}`]} testId={`error-property-owner-${index}`} />
+                                {unitMappedProperty && owners.length > 1 && ownerName && <p className="mt-2 text-[10px] text-[#817d75]">Units assigned: {summarizeOwnerUnits(ownerKey) || 'None yet'}</p>}
+                              </article>
+                            );
+                          })}
+                        </div>
+                        {unitMappedProperty && owners.length === 1 && <div className="mt-3 rounded-[10px] border border-[#dbe5dc] bg-[#f4f7f2] px-3.5 py-3 text-[10px] leading-4 text-[#586b5c]">
+                          <strong className="font-semibold">One owner, all units.</strong> This owner will be prefilled and locked on every unit.
+                        </div>}
+                        {unitMappedProperty && owners.length > 1 && Number.isInteger(configuredUnits) && configuredUnits > 0 && <div className="mt-3 rounded-[11px] border border-[#e8e5de] bg-[#f8f7f4] p-3.5" data-testid="section-unit-ownership-map">
+                          <div className="mb-3"><p className="text-[11px] font-semibold text-[#48463f]">Map owners to units</p><p className="mt-1 text-[10px] leading-4 text-[#89867e]">Choose every owner for each unit. If a unit has multiple owners, enter shares totaling 100%. Unit owners will be locked when you add the unit.</p></div>
+                          <div className="space-y-2">
+                            {Array.from({ length: configuredUnits }, (_, unitIndex) => {
+                              const unitNumber = String(unitIndex + 1);
+                              const assignments = unitOwnerAssignments.filter((assignment) =>
+                                assignment.unit_number === unitNumber
+                                && owners.some((owner, index) => ownerAssignmentKey(owner, index) === assignment.owner_key),
+                              );
+                              return <div key={unitNumber} data-testid={`card-unit-ownership-map-${unitNumber}`} className="rounded-[9px] border border-[#ebe8e2] bg-white p-3">
+                                <p className="mb-2 text-[10px] font-semibold text-[#5b5851]">Unit {unitNumber}</p>
+                                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                                  {owners.map((owner, ownerIndex) => {
+                                    const ownerKey = ownerAssignmentKey(owner, ownerIndex);
+                                    const selectedContact = contacts.find((contact) => String(contact.id) === owner.contact_id);
+                                    const label = owner.source === 'new' ? owner.name || `Owner ${ownerIndex + 1}` : (selectedContact?.name ?? owner.name) || `Owner ${ownerIndex + 1}`;
+                                    const selected = assignments.some((assignment) => assignment.owner_key === ownerKey);
+                                    return <button key={ownerKey} type="button" role="checkbox" aria-checked={selected} data-testid={`checkbox-unit-${unitNumber}-owner-${ownerIndex}`} onClick={() => setUnitOwnerAssignments((current) => selected
+                                      ? current.filter((assignment) => !(assignment.unit_number === unitNumber && assignment.owner_key === ownerKey))
+                                      : [...current, { unit_number: unitNumber, owner_key: ownerKey, ownership_percentage: '' }])} className={`flex min-h-9 items-center gap-2 rounded-[8px] border px-2.5 text-left text-[10px] ${selected ? 'border-[#b9cabe] bg-[#edf4ee] text-[#4d6a59]' : 'border-[#e7e4de] bg-white text-[#69665f] hover:bg-[#f8faf7]'}`}><span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border ${selected ? 'border-[#63816e] bg-[#63816e] text-white' : 'border-[#d5d2ca] bg-white'}`}>{selected && <Check size={10} />}</span><span className="truncate">{label}</span></button>;
+                                  })}
+                                </div>
+                                {assignments.length > 1 && <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                  {assignments.map((assignment) => {
+                                    const ownerIndex = owners.findIndex((owner, index) => ownerAssignmentKey(owner, index) === assignment.owner_key);
+                                    const owner = owners[ownerIndex];
+                                    const contact = owner ? contacts.find((item) => String(item.id) === owner.contact_id) : undefined;
+                                    const label = owner?.source === 'new' ? owner.name || `Owner ${ownerIndex + 1}` : contact?.name ?? owner?.name ?? `Owner ${ownerIndex + 1}`;
+                                    return <Field key={assignment.owner_key} label={`${label} share (%)`} required><input data-testid={`input-unit-${unitNumber}-owner-${ownerIndex}-percentage`} className={inputClass} type="number" min="0.01" max="100" step="0.01" value={assignment.ownership_percentage} onChange={(event) => setUnitOwnerAssignments((current) => current.map((item) => item.unit_number === unitNumber && item.owner_key === assignment.owner_key ? { ...item, ownership_percentage: event.target.value } : item))} placeholder="e.g. 50" /></Field>;
+                                  })}
+                                </div>}
+                              </div>;
+                            })}
+                          </div>
+                          <FormError message={validation.unit_ownership_map} testId="error-unit-ownership-map" />
+                        </div>}
+                        {ownerSharesCanBeSummed && hasEnteredOwnerShare && !unitMappedProperty && (Math.abs(ownerShareTotal - 100) > 0.001 || hasUnenteredOwnerShare) && <div role="status" aria-live="polite" data-testid="notice-owner-share-total" className="mt-3 rounded-[9px] border border-[#ead9b4] bg-[#fff9eb] px-3 py-2 text-[10px] leading-[1.5] text-[#836422]">{ownerShareTotal < 100 ? `Ownership is currently ${formatOwnershipShare(ownerShareTotal)}%. Add another owner for the remaining ${formatOwnershipShare(100 - ownerShareTotal)}%, or adjust the shares so they total 100%.` : ownerShareTotal > 100 ? `Ownership currently totals ${formatOwnershipShare(ownerShareTotal)}%. Reduce the shares so they total 100%.` : 'All 100% is already allocated. Reduce the current shares before assigning another owner.'}</div>}
+                        {owners.length < 20 && <button type="button" data-testid="button-add-property-owner" onClick={() => setOwners((current) => [...current, blankOwner()])} className="mt-3 flex h-9 items-center gap-2 rounded-[9px] border border-dashed border-[#d8d5ce] px-3 text-[11px] font-semibold text-[#6f6b63] transition-colors hover:border-[#aebcaf] hover:bg-[#f3f6f1] hover:text-[#4f6d58]"><Plus size={13} />Add another owner</button>}
+                        <FormError message={validation.owners || validation.owner_total} testId="error-property-owner-total" />
+                      </section>
+                    )}
 
                     {(singleFamily || multifamily || apartment || commercial || mixedUse || industrial) && (
                       <section className="mb-7" data-testid="section-property-facilities">
@@ -1050,31 +1270,6 @@ export default function PropertySetupForm({ property, contacts, initialOwners, i
                         {customFacilities.length > 0 && <div className="mt-2 flex flex-wrap gap-1.5">{customFacilities.map((facility) => <span key={facility} data-testid={`chip-custom-facility-${facility}`} className="inline-flex items-center gap-1 rounded-full bg-[#eaf0e9] px-2.5 py-1 text-[10px] text-[#526d5b]">{facility}<button type="button" data-testid={`button-remove-facility-${facility}`} aria-label={`Remove ${facility}`} onClick={() => setCustomFacilities((current) => current.filter((item) => item !== facility))}><X size={11} /></button></span>)}</div>}
                       </section>
                     )}
-
-                    {(singleFamily || apartment || commercial || industrial) && <section className="mb-7" data-testid="section-property-owners">
-                      <SectionHeading index="03" eyebrow="Ownership" title="Who owns this property?" description={mixedUse ? 'Ownership shares must total 100%. For multiple owners, also assign the uses each owner owns.' : apartment ? 'Ownership shares must total 100%. For multiple owners, also record each owner’s unit scope.' : 'Add one or more owners. Ownership shares must total 100%.'} />
-                      <div className="space-y-3">
-                        {owners.map((owner, index) => (
-                          <article key={owner.id ?? `owner-${index}`} data-testid={`card-property-owner-${index}`} className="rounded-[12px] border border-[#e7e4de] bg-white p-3.5 sm:p-4">
-                            <div className="mb-3 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f0f2ec] text-[#7e8a77]"><UserRound size={13} /></span><div><p className="text-[12px] font-semibold text-[#37362f]">{owners.length > 1 ? `Owner ${index + 1}` : 'Property owner'}</p><p className="mt-0.5 text-[10px] text-[#969188]">Select a contact or add one</p></div></div>{owners.length > 1 && <button type="button" data-testid={`button-remove-owner-${index}`} onClick={() => setOwners((current) => current.filter((_, ownerIndex) => ownerIndex !== index))} aria-label={`Remove owner ${index + 1}`} className="flex h-7 w-7 items-center justify-center rounded-full text-[#938e85] hover:bg-[#fbefed] hover:text-[#a33e34]"><Trash2 size={13} /></button>}</div>
-                            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                               <Field label="Entity type" required><FlowPointSelect testId={`select-owner-${index}-entity-type`} value={owner.entity_type} onChange={(value) => setOwner(index, { entity_type: value as OwnerDraft['entity_type'], contact_id: '', source: 'existing' })} placeholder="Choose entity type" options={[{ value: 'individual', label: 'Individual' }, { value: 'company', label: 'Company' }]} /></Field>
-                               <Field label="Ownership share" required><div className="relative"><input data-testid={`input-owner-${index}-percentage`} className={`${inputClass} pr-8`} type="number" min="0.01" max="100" step="0.01" value={owner.ownership_percentage} onChange={(event) => setOwner(index, { ownership_percentage: event.target.value })} placeholder="e.g. 100" /><span className="pointer-events-none absolute right-3 top-[11px] text-[11px] text-[#929087]">%</span></div></Field>
-                               {apartment && owners.length > 1 && <div className="sm:col-span-2"><Field label="Unit scope" required hint="units or ranges"><input data-testid={`input-owner-${index}-scope`} className={inputClass} value={owner.ownership_scope} onChange={(event) => setOwner(index, { ownership_scope: event.target.value })} placeholder="e.g. 1–4, 8" /></Field></div>}
-                               {mixedUse && owners.length > 1 && <div className="sm:col-span-2"><Field label="Uses this owner owns" required hint="Select every included use they own"><div className="grid grid-cols-1 gap-1.5 rounded-[9px] border border-[#e4e2de] bg-white p-2 sm:grid-cols-2">{MIXED_USE_COMPONENTS.filter((component) => mixedUseComponents.includes(component.value)).map((component) => {
-                                 const checked = mixedUseOwnershipScopeValues(owner.ownership_scope).includes(component.value);
-                                 return <button key={component.value} type="button" data-testid={`button-owner-${index}-scope-${component.value}`} aria-pressed={checked} onClick={() => toggleOwnerMixedUseScope(index, component.value)} className={`flex min-h-8 items-center gap-2 rounded-[7px] px-2 text-left text-[10px] ${checked ? 'bg-[#edf4ee] text-[#4d6a59]' : 'text-[#69665f] hover:bg-[#f7f6f2]'}`}><span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[4px] border ${checked ? 'border-[#63816e] bg-[#63816e] text-white' : 'border-[#d5d2ca] bg-white'}`}>{checked && <Check size={10} />}</span>{component.label}</button>;
-                                })}</div></Field></div>}
-                            </div>
-                             <div className="mt-3"><ContactFields row={owner} index={index} kind="owner" contacts={contacts} entityType={owner.entity_type} onChange={(patch) => setOwner(index, patch as Partial<OwnerDraft>)} /></div>
-                              <FormError message={validation[`owner_${index}`] || validation[`owner_share_${index}`] || validation[`owner_scope_${index}`]} testId={`error-property-owner-${index}`} />
-                          </article>
-                        ))}
-                      </div>
-                      {ownerSharesCanBeSummed && hasEnteredOwnerShare && (Math.abs(ownerShareTotal - 100) > 0.001 || hasUnenteredOwnerShare) && <div role="status" aria-live="polite" data-testid="notice-owner-share-total" className="mt-3 rounded-[9px] border border-[#ead9b4] bg-[#fff9eb] px-3 py-2 text-[10px] leading-[1.5] text-[#836422]">{ownerShareTotal < 100 ? `Ownership is currently ${formatOwnershipShare(ownerShareTotal)}%. Add another owner for the remaining ${formatOwnershipShare(100 - ownerShareTotal)}%, or adjust the shares so they total 100%.` : ownerShareTotal > 100 ? `Ownership currently totals ${formatOwnershipShare(ownerShareTotal)}%. Reduce the shares so they total 100%.` : 'All 100% is already allocated. Reduce the current shares before assigning another owner.'}</div>}
-                      {owners.length < 20 && <button type="button" data-testid="button-add-property-owner" onClick={() => setOwners((current) => [...current, blankOwner()])} className="mt-3 flex h-9 items-center gap-2 rounded-[9px] border border-dashed border-[#d8d5ce] px-3 text-[11px] font-semibold text-[#6f6b63] transition-colors hover:border-[#aebcaf] hover:bg-[#f3f6f1] hover:text-[#4f6d58]"><Plus size={13} />Add another owner</button>}
-                      <FormError message={validation.owners || validation.owner_total} testId="error-property-owner-total" />
-                    </section>}
 
                     {propertyCanRent && (
                       <section data-testid="section-property-rental">

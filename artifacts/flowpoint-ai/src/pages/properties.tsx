@@ -8,7 +8,7 @@ import { useAuth } from '@/hooks/useAuth';
 import AppLayout from '@/components/AppLayout';
 import FlowPointSelect from '@/components/FlowPointSelect';
 import PageFilterMenu from '@/components/PageFilterMenu';
-import PropertyProfileModal, { type PropertyServiceLink, type PropertyStaffLink, type PropertyUnitServiceLink } from '@/components/PropertyProfileModal';
+import PropertyProfileModal from '@/components/PropertyProfileModal';
 import PropertyUnitManager, { type UnitSavePayload } from '@/components/PropertyUnitManager';
 import PropertySetupForm, {
   type PropertyOwnerDraft,
@@ -240,10 +240,6 @@ export default function PropertiesPage() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [relationships, setRelationships] = useState<ContactPropertyRelationship[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
-  const [staffAssignments, setStaffAssignments] = useState<PropertyStaffLink[]>([]);
-  const [propertyServices, setPropertyServices] = useState<PropertyServiceLink[]>([]);
-  const [unitServices, setUnitServices] = useState<PropertyUnitServiceLink[]>([]);
-  const [connectionLoadError, setConnectionLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -258,29 +254,12 @@ export default function PropertiesPage() {
   const loadProperties = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const [propertyResult, contactResult, relationshipResult, unitResult, staffAssignmentResult, propertyServiceResult] = await Promise.all([
+    const [propertyResult, contactResult, relationshipResult, unitResult] = await Promise.all([
       supabase.from('properties').select('*').order('name', { ascending: true }),
       supabase.from('contacts').select('*').order('name', { ascending: true }),
       supabase.from('contact_property_relationships').select(ownerRelationshipSelect),
       supabase.from('units').select('*').order('unit_number', { ascending: true }),
-      supabase.from('staff_property_relationships').select('id, staff_id, property_id, notes, staff:staff(id, name, role, department, status)'),
-      supabase.from('service_properties').select('id, service_id, property_id, service:services(id, name, category, status)'),
     ]);
-    const loadedUnits = (unitResult.data as Unit[]) ?? [];
-    let unitServiceData: PropertyUnitServiceLink[] = [];
-    let unitServiceError: string | null = null;
-    if (loadedUnits.length) {
-      const unitServiceResult = await supabase.from('service_units')
-        .select('id, service_id, unit_id, unit:units(id, unit_number, property_id), service:services(id, name, category, status)')
-        .in('unit_id', loadedUnits.map((unit) => unit.id));
-      unitServiceError = unitServiceResult.error?.message ?? null;
-      unitServiceData = (unitServiceResult.data as unknown as PropertyUnitServiceLink[]) ?? [];
-    }
-    const connectionErrors = [staffAssignmentResult.error?.message, propertyServiceResult.error?.message, unitServiceError].filter(Boolean);
-    setConnectionLoadError(connectionErrors.length ? connectionErrors.join(' · ') : null);
-    setStaffAssignments((staffAssignmentResult.data as unknown as PropertyStaffLink[]) ?? []);
-    setPropertyServices((propertyServiceResult.data as unknown as PropertyServiceLink[]) ?? []);
-    setUnitServices(unitServiceData);
     const criticalError = propertyResult.error ?? unitResult.error ?? relationshipResult.error ?? contactResult.error;
     if (criticalError) setError(criticalError.message);
     else {
@@ -415,19 +394,44 @@ export default function PropertiesPage() {
     const duplicateOwner = ownerDrafts.filter((owner) => owner.source === 'existing').some((owner, index, list) => list.findIndex((item) => item.contact_id === owner.contact_id) !== index);
     if (duplicateOwner) throw new Error('Each owner can only be added once.');
 
+    const isMappedUnitProperty = draft.property_type === 'multifamily_units' || draft.property_type === 'apartment_building';
+    const initialDraft: PropertyDraft = {
+      ...draft,
+      units_under_construction: !current && isMappedUnitProperty
+        ? true
+        : Boolean(draft.units_under_construction),
+      unit_ownership_map: current ? current.unit_ownership_map ?? [] : [],
+    };
     const saveResult = current
-      ? await supabase.from('properties').update(draft).eq('id', current.id).select().single()
-      : await supabase.from('properties').insert([draft]).select().single();
+      ? await supabase.from('properties').update(initialDraft).eq('id', current.id).select().single()
+      : await supabase.from('properties').insert([initialDraft]).select().single();
     if (saveResult.error) throw new Error(saveResult.error.message);
-    const saved = saveResult.data as Property;
+    let saved = saveResult.data as Property;
     try {
       const syncedContacts = await syncPropertyRelationships(saved.id, saved.property_type, ownerDrafts, renterDraft);
       const contactCache = syncedContacts.contacts;
       const syntheticOwnerIds = new Map<string, string>();
+      const ownerContactRemap = new Map<string, string>();
       ownerDrafts.forEach((owner, index) => {
         const resolvedId = syncedContacts.ownerContactIds[index];
-        if (owner.source === 'new' && resolvedId) syntheticOwnerIds.set(String(owner.temp_contact_id ?? -(index + 1)), resolvedId);
+        if (!resolvedId) return;
+        const originalId = owner.source === 'new'
+          ? String(owner.temp_contact_id ?? -(index + 1))
+          : String(owner.contact_id);
+        ownerContactRemap.set(originalId, resolvedId);
+        if (owner.source === 'new') syntheticOwnerIds.set(originalId, resolvedId);
       });
+      const resolvedUnitOwnershipMap = (draft.unit_ownership_map ?? []).map((allocation) => ({
+        ...allocation,
+        contact_id: ownerContactRemap.get(String(allocation.contact_id)) ?? String(allocation.contact_id),
+      }));
+      const { data: updatedProperty, error: ownershipMapError } = await supabase.from('properties')
+        .update({ unit_ownership_map: resolvedUnitOwnershipMap })
+        .eq('id', saved.id)
+        .select()
+        .single();
+      if (ownershipMapError) throw new Error(`Unable to save unit ownership mapping: ${ownershipMapError.message}`);
+      saved = updatedProperty as Property;
       for (const payload of inlineUnits) {
         const resolvedPayload = {
           ...payload,
@@ -438,6 +442,17 @@ export default function PropertiesPage() {
           draft: { ...payload.draft, property_id: saved.id },
         };
         await saveUnit(resolvedPayload, null, contactCache, saved.property_type);
+      }
+      if (!current && isMappedUnitProperty) {
+        const configuredUnitCount = Number(draft.units_count) || 0;
+        const finalConstructionState = inlineUnits.length < configuredUnitCount && Boolean(draft.units_under_construction);
+        const { data: finalizedProperty, error: constructionError } = await supabase.from('properties')
+          .update({ units_under_construction: finalConstructionState })
+          .eq('id', saved.id)
+          .select()
+          .single();
+        if (constructionError) throw new Error(`Unable to finalize unit construction status: ${constructionError.message}`);
+        saved = finalizedProperty as Property;
       }
     } catch (saveError) {
       if (!current) {
@@ -462,6 +477,7 @@ export default function PropertiesPage() {
     const savedUnit = unitResult.data as Unit;
     const unitPropertyType = propertyTypeOverride ?? properties.find((item) => item.id === savedUnit.property_id)?.property_type ?? null;
     const isMixedUseSpace = unitPropertyType === 'mixed_use_development';
+    const isMappedUnitProperty = unitPropertyType === 'multifamily_units' || unitPropertyType === 'apartment_building';
     const resolvedContacts = contactCache ?? [...contacts];
     try {
       const rows: Array<Record<string, unknown>> = [];
@@ -477,7 +493,7 @@ export default function PropertiesPage() {
             end_date: null,
             notes: null,
             ownership_percentage: isMixedUseSpace || !owner.ownership_percentage.trim() ? null : Number(owner.ownership_percentage),
-            ownership_scope: isMixedUseSpace ? 'Entire space' : null,
+            ownership_scope: isMixedUseSpace ? 'Entire space' : owner.ownership_scope || null,
           });
         }
       }
@@ -501,6 +517,20 @@ export default function PropertiesPage() {
         ? await supabase.from('contact_property_relationships').insert(rows).select(ownerRelationshipSelect)
         : { data: [], error: null };
       if (insertError) throw new Error(`Unable to save unit contacts: ${insertError.message}`);
+      const parentProperty = properties.find((item) => item.id === savedUnit.property_id);
+      if (isMappedUnitProperty && parentProperty) {
+        const unitsAfterSave = units.filter((item) => item.property_id === savedUnit.property_id && item.id !== savedUnit.id).length + 1;
+        const stillBuildingUnits = unitsAfterSave < (parentProperty.units_count ?? 0);
+        if (parentProperty.units_under_construction !== stillBuildingUnits) {
+          const { error: constructionError } = await supabase.from('properties')
+            .update({ units_under_construction: stillBuildingUnits })
+            .eq('id', parentProperty.id);
+          if (constructionError) throw new Error(`Unable to update construction status: ${constructionError.message}`);
+          const updatedProperty = { ...parentProperty, units_under_construction: stillBuildingUnits };
+          setProperties((current) => current.map((item) => item.id === updatedProperty.id ? updatedProperty : item));
+          setProfileProperty((current) => current?.id === updatedProperty.id ? updatedProperty : current);
+        }
+      }
       setContacts([...resolvedContacts]);
       setUnits((current) => {
         const next = existingUnit ? current.map((item) => item.id === savedUnit.id ? savedUnit : item) : [...current, savedUnit];
@@ -517,6 +547,22 @@ export default function PropertiesPage() {
   const deleteUnit = async (unit: Unit) => {
     const { error: deleteError } = await supabase.from('units').delete().eq('id', unit.id);
     if (deleteError) throw new Error(deleteError.message);
+    const parentProperty = properties.find((item) => item.id === unit.property_id);
+    const remainingUnits = units.filter((item) => item.property_id === unit.property_id && item.id !== unit.id).length;
+    if (
+      parentProperty
+      && (parentProperty.property_type === 'multifamily_units' || parentProperty.property_type === 'apartment_building')
+      && remainingUnits < (parentProperty.units_count ?? 0)
+      && !parentProperty.units_under_construction
+    ) {
+      const { error: constructionError } = await supabase.from('properties')
+        .update({ units_under_construction: true })
+        .eq('id', parentProperty.id);
+      if (constructionError) throw new Error(`Unit deleted, but construction status could not be updated: ${constructionError.message}`);
+      const updatedProperty = { ...parentProperty, units_under_construction: true };
+      setProperties((current) => current.map((item) => item.id === updatedProperty.id ? updatedProperty : item));
+      setProfileProperty((current) => current?.id === updatedProperty.id ? updatedProperty : current);
+    }
     setUnits((current) => current.filter((item) => item.id !== unit.id));
     setRelationships((current) => current.filter((item) => item.unit_id !== unit.id));
     setFeedback({ tone: 'success', message: 'Unit deleted.' });
@@ -550,14 +596,24 @@ export default function PropertiesPage() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[1240px] px-5 py-6 sm:px-8 sm:py-8">
           {feedback && <div data-testid={`feedback-properties-${feedback.tone}`} className={`mb-5 flex items-center justify-between rounded-[10px] border px-3 py-2.5 text-[11px] ${feedback.tone === 'success' ? 'border-[#d2ead7] bg-[#f2faf3] text-[#327443]' : 'border-[#f0c8c3] bg-[#fff7f6] text-[#a33a30]'}`}><span className="flex items-center gap-2">{feedback.tone === 'success' ? <Check size={13} /> : <AlertCircle size={13} />}{feedback.message}</span><button type="button" data-testid="button-dismiss-properties-feedback" onClick={() => setFeedback(null)} aria-label="Dismiss message"><X size={13} /></button></div>}
-          <div className="mb-5 flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
-            <div><p className="text-[12px] text-[#706c64]">A clear home for every place your team looks after.</p><p className="mt-1 text-[10px] text-[#a19c93]">{properties.length} {properties.length === 1 ? 'property' : 'properties'} in your portfolio</p></div>
-            <div className="flex w-full items-center gap-2 sm:w-auto">
-              <label className="relative min-w-0 flex-1 sm:min-w-[230px]"><Search size={12} className="pointer-events-none absolute left-[10px] top-1/2 -translate-y-1/2 text-[#aaa59d]" /><input data-testid="input-property-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or address" className="h-[32px] w-full rounded-[8px] border border-[#e5e2dd] bg-[#faf9f7] pl-7 pr-7 text-[11px] text-[#151412] outline-none placeholder:text-[#b3b0aa] focus:border-[#cfcac2] focus:bg-white" />{search && <button type="button" data-testid="button-clear-property-search" onClick={() => setSearch('')} aria-label="Clear search" className="absolute right-2 top-1/2 -translate-y-1/2 text-[#aaa59d] hover:text-[#151412]"><X size={11} /></button>}</label>
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-[12px] text-[#706c64]">A clear home for every place your team looks after.</p>
+            <p className="text-[10px] text-[#a19c93]">{properties.length} {properties.length === 1 ? 'property' : 'properties'} in your portfolio</p>
+          </div>
+          <div className="mb-5 rounded-[13px] border border-[#e9e6e1] bg-white p-3.5">
+            <div className="flex items-center gap-2">
+              <label className="relative min-w-0 flex-1">
+                <Search size={12} className="pointer-events-none absolute left-[10px] top-1/2 -translate-y-1/2 text-[#aaa59d]" />
+                <input data-testid="input-property-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name or address" className="h-[30px] w-full rounded-[8px] border border-[#e5e2dd] bg-[#faf9f7] pl-7 pr-7 text-[12px] text-[#151412] outline-none placeholder:text-[#b3b0aa] focus:border-[#cfcac2] focus:bg-white" />
+                {search && <button type="button" data-testid="button-clear-property-search" onClick={() => setSearch('')} aria-label="Clear search" className="absolute right-2 top-1/2 -translate-y-1/2 text-[#aaa59d] hover:text-[#151412]"><X size={11} /></button>}
+              </label>
               <PageFilterMenu testId="button-property-filters" activeCount={[typeFilter, statusFilter].filter(Boolean).length} onReset={() => { setTypeFilter(''); setStatusFilter(''); }}>
                 <FlowPointSelect testId="select-property-type-filter" value={typeFilter} onChange={setTypeFilter} placeholder="All subtypes" options={PROPERTY_TYPES.map((type) => ({ value: type.value, label: type.label }))} />
                 <FlowPointSelect testId="select-property-status-filter" value={statusFilter} onChange={setStatusFilter} placeholder="All statuses" options={[...PROPERTY_STATUSES]} />
               </PageFilterMenu>
+              <button type="button" onClick={() => void loadProperties()} disabled={loading} aria-label="Refresh properties" data-testid="button-refresh-properties" className="flex h-[30px] w-[30px] flex-shrink-0 items-center justify-center rounded-[8px] border border-[#e5e2dd] bg-[#faf9f7] text-[#78746d] transition-colors hover:bg-[#f0eeea] hover:text-[#34312c] disabled:cursor-not-allowed disabled:opacity-55">
+                <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+              </button>
             </div>
           </div>
           {loading && <div data-testid="loading-properties" className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">{[1, 2, 3, 4, 5, 6].map((item) => <div key={item} className="h-[150px] animate-pulse rounded-[13px] border border-[#eeeae5] bg-[#f0eeeb]" />)}</div>}
@@ -568,7 +624,7 @@ export default function PropertiesPage() {
         </div>
       </div>
       <AnimatePresence>{formProperty !== undefined && <PropertySetupForm key={formProperty?.id ?? 'new'} property={formProperty} contacts={contacts} initialOwners={formOwners} initialRenter={formRenter} existingUnits={units} onSave={saveProperty} onClose={() => setFormProperty(undefined)} />}</AnimatePresence>
-      {profileProperty && !deleteOpen && <PropertyProfileModal property={profileProperty} contacts={contacts} ownerships={relationships} units={units} staffAssignments={staffAssignments} propertyServices={propertyServices} unitServices={unitServices} connectionLoadError={connectionLoadError} onClose={() => setProfileProperty(null)} onEdit={() => { setFormProperty(profileProperty); setProfileProperty(null); }} onDelete={() => setDeleteOpen(true)} />}
+      {profileProperty && !deleteOpen && <PropertyProfileModal property={profileProperty} contacts={contacts} ownerships={relationships} units={units} onClose={() => setProfileProperty(null)} onEdit={() => { setFormProperty(profileProperty); setProfileProperty(null); }} onDelete={() => setDeleteOpen(true)} />}
       <AnimatePresence>{deleteOpen && profileProperty && <ConfirmDelete name={profileProperty.name} deleting={deleting} onCancel={() => setDeleteOpen(false)} onConfirm={() => void deleteProperty()} />}</AnimatePresence>
     </div>
   </AppLayout>;

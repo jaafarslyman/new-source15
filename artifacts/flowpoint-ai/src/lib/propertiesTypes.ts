@@ -1,7 +1,7 @@
 export interface PropertyUnitOwnerAllocation {
   unit_number: string;
   contact_id: string;
-  ownership_percentage: number;
+  ownership_percentage: number | null;
 }
 
 export interface Property {

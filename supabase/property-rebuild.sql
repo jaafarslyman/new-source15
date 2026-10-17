@@ -38,6 +38,8 @@ create table if not exists public.properties (
   description text,
 
   units_count integer,
+  units_under_construction boolean not null default false,
+  unit_ownership_map jsonb not null default '[]'::jsonb,
   floor_count integer,
   floor_unit_counts integer[] not null default '{}',
   room_count integer,
@@ -125,6 +127,8 @@ drop trigger if exists validate_property_unit_count_before_write on public.prope
 -- its useful operational fields and align the address requirements with the UI.
 alter table public.properties
   add column if not exists property_category text,
+  add column if not exists units_under_construction boolean not null default false,
+  add column if not exists unit_ownership_map jsonb not null default '[]'::jsonb,
   add column if not exists floor_count integer,
   add column if not exists floor_unit_counts integer[] not null default '{}',
   add column if not exists room_count integer,
